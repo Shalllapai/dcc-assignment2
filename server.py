@@ -19,12 +19,16 @@ class CounterServicer(counter_pb2_grpc.CounterServicer):
         self._seen = {}
         self._delay_ms = delay_ms
         self._fault = fault
+        self._fault_triggered = False
 
     def Increment(self, request: counter_pb2.IncrementRequest, context):
         recv_l = self.clock.update(request.lamport_time)
         print(f"[{self.node_id}] RECV Increment(counter={request.counter_id}, delta={request.delta}) L={recv_l} (received L={request.lamport_time})", flush=True)
 
-        if self._delay_ms > 0:
+        if self._fault == "delay-once" and not self._fault_triggered:
+            self._fault_triggered = True
+            time.sleep(2.5)
+        elif self._delay_ms > 0:
             time.sleep(self._delay_ms / 1000.0)
 
         with self._lock:
