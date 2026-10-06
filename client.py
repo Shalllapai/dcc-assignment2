@@ -6,22 +6,20 @@ import grpc
 
 import counter_pb2
 import counter_pb2_grpc
+from clocks import LamportClock
 
 
 class CounterClient:
-    def __init__(self, target: str = "localhost:50051"):
+    def __init__(self, target: str = "localhost:50051", client_id: str = "client-1"):
+        self.target = target
+        self.client_id = client_id
+        self.clock = LamportClock()
         self.channel = grpc.insecure_channel(target)
         self.stub = counter_pb2_grpc.CounterStub(self.channel)
 
     def incr(self, counter_id: str, delta: int = 1, key: str = None) -> counter_pb2.IncrementReply:
         if key is None:
             key = str(uuid.uuid4())
-
-        request = counter_pb2.IncrementRequest(
-            counter_id=counter_id,
-            delta=delta,
-            idempotency_key=key
-        )
 
         backoff_delays = [0.2, 0.4, 0.8]
         last_error = None
@@ -30,8 +28,19 @@ class CounterClient:
             if delay > 0:
                 time.sleep(delay)
 
+            send_l = self.clock.tick()
+            request = counter_pb2.IncrementRequest(
+                counter_id=counter_id,
+                delta=delta,
+                idempotency_key=key,
+                lamport_time=send_l
+            )
+            print(f"[{self.client_id}] SEND Increment(counter={counter_id}, delta={delta}) L={send_l}", flush=True)
+
             try:
                 reply = self.stub.Increment(request, timeout=2.0)
+                recv_l = self.clock.update(reply.lamport_time)
+                print(f"[{self.client_id}] RECV IncrementReply(new_value={reply.new_value}) L={recv_l} (received L={reply.lamport_time})", flush=True)
                 return reply
             except grpc.RpcError as e:
                 code = e.code()
@@ -43,8 +52,14 @@ class CounterClient:
         raise last_error
 
     def get(self, counter_id: str) -> counter_pb2.GetReply:
-        request = counter_pb2.GetRequest(counter_id=counter_id)
-        return self.stub.Get(request, timeout=2.0)
+        send_l = self.clock.tick()
+        request = counter_pb2.GetRequest(counter_id=counter_id, lamport_time=send_l)
+        print(f"[{self.client_id}] SEND Get(counter={counter_id}) L={send_l}", flush=True)
+
+        reply = self.stub.Get(request, timeout=2.0)
+        recv_l = self.clock.update(reply.lamport_time)
+        print(f"[{self.client_id}] RECV GetReply(value={reply.value}) L={recv_l} (received L={reply.lamport_time})", flush=True)
+        return reply
 
     def close(self):
         self.channel.close()
@@ -53,6 +68,7 @@ class CounterClient:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--target", default="localhost:50051")
+    parser.add_argument("--client-id", default="client-1")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     incr_parser = subparsers.add_parser("incr")
@@ -64,7 +80,7 @@ def main():
     get_parser.add_argument("counter_id", type=str)
 
     args = parser.parse_args()
-    client = CounterClient(target=args.target)
+    client = CounterClient(target=args.target, client_id=args.client_id)
 
     try:
         if args.command == "incr":
